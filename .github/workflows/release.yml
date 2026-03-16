@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # triggers on v1.0.0, v1.1.0, etc.
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release artifacts
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake build-essential python3 \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
+            zip
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      # ── Cross-compile rv64gc (widest compatibility) ──────────────────────
+      - name: Build rv64gc (no RVV)
+        run: |
+          cmake -B build-rv64gc \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=riscv64-linux-gnu-g++ \
+            -DCMAKE_CROSSCOMPILING=TRUE \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
+            -DENABLE_RVV=OFF \
+            -DENABLE_OPENMP=ON \
+            -DENABLE_NETWORK_BENCH=ON
+          cmake --build build-rv64gc -j$(nproc)
+
+      # ── Package rv64gc release ───────────────────────────────────────────
+      - name: Package rv64gc
+        run: |
+          STAGEDIR=openrvbench-${{ steps.version.outputs.VERSION }}-rv64gc-linux
+          mkdir -p $STAGEDIR/bin $STAGEDIR/lib/openrvbench/modules
+
+          # CLI
+          cp cli/openrvbench $STAGEDIR/bin/
+          chmod +x $STAGEDIR/bin/openrvbench
+
+          # Benchmark binaries
+          for b in cpu memory crypto storage network thermal; do
+            BIN=$(find build-rv64gc -name "bench_$b" -type f | head -1)
+            [ -n "$BIN" ] && cp "$BIN" $STAGEDIR/lib/openrvbench/modules/
+          done
+
+          # Docs & scripts
+          cp README.md CHANGELOG.md LICENSE $STAGEDIR/
+          cp -r scripts $STAGEDIR/
+
+          tar -czf ${STAGEDIR}.tar.gz $STAGEDIR
+          echo "RV64GC_TARBALL=${STAGEDIR}.tar.gz" >> $GITHUB_ENV
+
+      # ── Create GitHub Release ────────────────────────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "OpenRVBench v${{ steps.version.outputs.VERSION }}"
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
+          files: |
+            ${{ env.RV64GC_TARBALL }}

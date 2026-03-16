@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Build & syntax-check on x86 (no RISC-V hardware needed) ──────────────
+  build-x86:
+    name: Build (x86, no RVV)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake build-essential python3
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_RVV=OFF \
+            -DENABLE_OPENMP=OFF \
+            -DENABLE_AI_BENCH=OFF \
+            -DENABLE_NETWORK_BENCH=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Check binaries exist
+        run: |
+          for b in bench_cpu bench_memory bench_crypto bench_storage bench_network bench_thermal; do
+            test -f build/benchmarks/${b%_*}/$b || \
+            find build -name "$b" | grep -q . || \
+            { echo "MISSING: $b"; exit 1; }
+          done
+          echo "All required binaries present"
+
+      - name: Python syntax check
+        run: python3 -m py_compile cli/openrvbench scripts/report_generator.py
+
+  # ── Cross-compile for RISC-V ──────────────────────────────────────────────
+  build-riscv:
+    name: Cross-compile (rv64gc)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V cross-compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc-riscv64-linux-gnu g++-riscv64-linux-gnu python3
+
+      - name: Configure (cross-compile, no RVV)
+        run: |
+          cmake -B build-riscv \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=riscv64-linux-gnu-g++ \
+            -DCMAKE_CROSSCOMPILING=TRUE \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
+            -DENABLE_RVV=OFF \
+            -DENABLE_OPENMP=OFF \
+            -DENABLE_AI_BENCH=OFF \
+            -DENABLE_NETWORK_BENCH=ON
+
+      - name: Build
+        run: cmake --build build-riscv -j$(nproc)
+
+      - name: Verify RISC-V ELF format
+        run: |
+          find build-riscv -name "bench_*" -type f | while read b; do
+            file "$b" | grep -q "RISC-V" && echo "OK: $b" || { echo "BAD: $b"; exit 1; }
+          done
+
+  # ── Lint Python scripts ───────────────────────────────────────────────────
+  lint:
+    name: Python lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install pyflakes
+      - run: |
+          pyflakes cli/openrvbench scripts/report_generator.py \
+                   scripts/board_detect.py scripts/compare_results.py || true

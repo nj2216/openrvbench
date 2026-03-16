@@ -22,6 +22,35 @@ cryptography, storage, networking, and thermal behaviour.
 
 ---
 
+## Installation
+
+### Option A — One-liner (recommended)
+```bash
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/openrvbench/main/scripts/install.sh | bash
+```
+
+### Option B — Download release tarball manually
+```bash
+# Latest release page:
+# https://github.com/YOUR_USERNAME/openrvbench/releases/latest
+
+wget https://github.com/YOUR_USERNAME/openrvbench/releases/latest/download/openrvbench-1.0.0-rv64gc-linux.tar.gz
+tar -xzf openrvbench-1.0.0-rv64gc-linux.tar.gz
+cd openrvbench-1.0.0-rv64gc-linux
+sudo cp bin/openrvbench /usr/local/bin/
+sudo mkdir -p /usr/local/lib/openrvbench/modules
+sudo cp lib/openrvbench/modules/bench_* /usr/local/lib/openrvbench/modules/
+```
+
+### Option C — Build from source
+```bash
+git clone https://github.com/YOUR_USERNAME/openrvbench.git
+cd openrvbench
+./scripts/build.sh
+```
+
+---
+
 ## Quick Start
 
 ```bash
