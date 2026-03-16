@@ -173,12 +173,14 @@ static double bench_dot(size_t N = 32 * 1024 * 1024, double target_secs = 2.0) {
                 vfloat32m8_t vb = __riscv_vle32_v_f32m8(b.data() + i, vl);
                 acc = __riscv_vfmacc_vv_f32m8(acc, va, vb, vl);
             }
-            // Reduction to scalar
-            vfloat32m1_t red = __riscv_vfmv_v_f_f32m1(0.0f, 1);
-            // NOTE: fredusum requires proper LMUL handling
-            // simplified: just accumulate in a temp
-            (void)acc;
-            fsink = 0.0f;
+            // Reduce LMUL=8 accumulator to scalar via vfredusum.
+            // vfredusum_vs needs a 1-element m1 identity register.
+            size_t vl_one = __riscv_vsetvl_e32m1(1);
+            vfloat32m1_t identity = __riscv_vfmv_v_f_f32m1(0.0f, vl_one);
+            vfloat32m1_t result   = __riscv_vfredusum_vs_f32m8_f32m1(
+                                        acc, identity,
+                                        __riscv_vsetvl_e32m8(N));
+            fsink = __riscv_vfmv_f_s_f32m1_f32(result);
 #else
             float sum = 0.0f;
             for (size_t i = 0; i < N; ++i) sum += a[i] * b[i];
