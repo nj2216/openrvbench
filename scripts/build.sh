@@ -298,7 +298,7 @@ ok "CLI installed: $PREFIX/bin/openrvbench"
 info "Setting up module directory: $PREFIX/lib/openrvbench/modules..."
 MODULE_DIR="$PREFIX/lib/openrvbench/modules"
 mkdir -p "$MODULE_DIR"
-for bench in cpu memory crypto storage network thermal vector ai; do
+for bench in cpu memory crypto storage network thermal vector extensions ai; do
   BIN=$(find "$BUILD_DIR" -name "bench_$bench" -type f 2>/dev/null | head -1)
   if [[ -n "$BIN" ]]; then
     cp "$BIN" "$MODULE_DIR/bench_$bench"

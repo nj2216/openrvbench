@@ -498,7 +498,7 @@ def cmd_run(args):
 
     # Skip thermal unless explicitly requested
     if target == "all" and not args.include_thermal:
-        to_run = [b for b in to_run if b != "thermal", "extensions"]
+        to_run = [b for b in to_run if b not in  ("thermal", "extensions")]
         print(yellow("  (thermal benchmark skipped by default — use --include-thermal)"))
         print()
 
