@@ -134,7 +134,7 @@ ABS_CXX="$(command -v "$USER_CXX" 2>/dev/null || echo "$USER_CXX")"
 echo ""
 echo -e "${CYN}${BLD}"
 echo "  ╔══════════════════════════════════════════╗"
-echo "  ║  OpenRVBench Build System v1.0.2         ║"
+echo "  ║  OpenRVBench Build System v1.1.0         ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo -e "${RST}"
 

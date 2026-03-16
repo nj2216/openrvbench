@@ -315,7 +315,7 @@ def generate_html_report(board_info: dict,
   <div class="logo">🖥️</div>
   <div class="title-block">
     <h1>OpenRVBench</h1>
-    <p>RISC-V Benchmark Suite v1.0 &nbsp;·&nbsp; {date_str}</p>
+    <p>RISC-V Benchmark Suite v1.1.0&nbsp;·&nbsp; {date_str}</p>
   </div>
 </div>
 
