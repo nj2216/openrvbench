@@ -1,0 +1,677 @@
+#!/usr/bin/env python3
+# ─── OpenRVBench :: CLI Orchestrator ─────────────────────────────────────────
+# openrvbench  —  the top-level command that drives all benchmark modules,
+#                 collects results, and generates reports.
+#
+# Usage:
+#   openrvbench run all
+#   openrvbench run cpu
+#   openrvbench run ai  --model-dir /path/to/models
+#   openrvbench compare results/
+#   openrvbench report  results/latest.json
+#   openrvbench info
+# ─────────────────────────────────────────────────────────────────────────────
+"""OpenRVBench — RISC-V benchmark suite CLI."""
+
+import argparse
+import json
+import os
+import pathlib
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+import datetime
+import textwrap
+from typing import Optional
+
+# ─── ANSI colours ─────────────────────────────────────────────────────────────
+NO_COLOR = os.environ.get("NO_COLOR") or not sys.stdout.isatty()
+
+def _c(code: str, text: str) -> str:
+    if NO_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+def bold(t):    return _c("1",    t)
+def green(t):   return _c("32",   t)
+def yellow(t):  return _c("33",   t)
+def red(t):     return _c("31",   t)
+def cyan(t):    return _c("36",   t)
+def dim(t):     return _c("2",    t)
+def magenta(t): return _c("35",   t)
+
+# ─── Benchmark registry ───────────────────────────────────────────────────────
+# Maps bench ID → (binary name, description, default_timeout_secs)
+BENCH_REGISTRY = {
+    "cpu":     ("bench_cpu",     "CPU (integer, FP, multi-thread, compression)", 120),
+    "vector":  ("bench_vector",  "Vector Extension (RVV / SAXPY / matmul)",      60),
+    "memory":  ("bench_memory",  "Memory (bandwidth, latency, cache hierarchy)", 120),
+    "crypto":  ("bench_crypto",  "Cryptography (AES-256, SHA-256, ChaCha20)",    60),
+    "storage": ("bench_storage", "Storage (sequential + random I/O)",            180),
+    "network": ("bench_network", "Network (TCP throughput, UDP latency)",         60),
+    "ai":      ("bench_ai",      "AI Inference (GEMM proxy + llama.cpp/ONNX)",   600),
+    "thermal": ("bench_thermal", "Thermal (60 s stress + throttle detection)",   120),
+}
+
+ALL_BENCHES = list(BENCH_REGISTRY.keys())
+
+# ─── Locate benchmark binaries ────────────────────────────────────────────────
+def find_bench_dir() -> pathlib.Path:
+    """Find the directory containing bench_* binaries."""
+    candidates = [
+        pathlib.Path(__file__).parent / "build",
+        pathlib.Path(__file__).parent,
+        pathlib.Path("/usr/local/lib/openrvbench/modules"),
+        pathlib.Path("/usr/lib/openrvbench/modules"),
+    ]
+    # Walk subdirs of build/
+    for c in candidates:
+        if c.is_dir():
+            # Check if any bench binary is directly there
+            if any((c / f"bench_{b}").exists() for b in ALL_BENCHES):
+                return c
+            # Search one level deep
+            for sub in c.iterdir():
+                if sub.is_dir() and any(
+                    (sub / f"bench_{b}").exists() for b in ALL_BENCHES
+                ):
+                    return sub
+    return pathlib.Path(".")
+
+def find_binary(bench_id: str, bench_dir: pathlib.Path) -> Optional[pathlib.Path]:
+    binary_name = BENCH_REGISTRY[bench_id][0]
+    # Search recursively from bench_dir
+    for root, _dirs, files in os.walk(bench_dir):
+        if binary_name in files:
+            p = pathlib.Path(root) / binary_name
+            if os.access(p, os.X_OK):
+                return p
+    return None
+
+# ─── System info ──────────────────────────────────────────────────────────────
+def read_file(path: str) -> str:
+    try:
+        return pathlib.Path(path).read_text().strip()
+    except Exception:
+        return ""
+
+def detect_board() -> dict:
+    info = {}
+
+    # Device-tree model (most reliable on RISC-V)
+    for dt in ["/proc/device-tree/model",
+               "/sys/firmware/devicetree/base/model"]:
+        v = read_file(dt)
+        if v:
+            info["board"] = v.rstrip("\x00")
+            break
+    else:
+        info["board"] = "Unknown RISC-V Board"
+
+    # ISA string from cpuinfo
+    isa = ""
+    try:
+        for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("isa"):
+                isa = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    info["isa"]     = isa or "unknown"
+    info["has_rvv"] = bool(isa and re.search(r'\bv\b|_v_|[Vv]', isa))
+
+    # CPU count
+    info["cores"] = os.cpu_count() or 1
+
+    # RAM
+    try:
+        for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                info["ram_gb"] = round(kb / 1024 / 1024, 1)
+                break
+    except Exception:
+        info["ram_gb"] = 0.0
+
+    # Kernel
+    info["kernel"] = platform.release()
+
+    # OS
+    try:
+        for line in pathlib.Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                info["os"] = line.split("=", 1)[1].strip('"')
+                break
+        else:
+            info["os"] = "unknown"
+    except Exception:
+        info["os"] = platform.system()
+
+    # CPU max freq
+    freq_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"
+    freq_str = read_file(freq_path)
+    if freq_str:
+        try:
+            info["cpu_freq_mhz"] = int(freq_str) // 1000
+        except ValueError:
+            pass
+
+    return info
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RUNNER
+# ─────────────────────────────────────────────────────────────────────────────
+def run_bench(bench_id: str, bench_dir: pathlib.Path,
+              extra_args: list = None,
+              timeout: int = None) -> dict:
+    binary = find_binary(bench_id, bench_dir)
+
+    if binary is None:
+        return {
+            "bench_id":    bench_id,
+            "bench_name":  BENCH_REGISTRY[bench_id][1],
+            "passed":      False,
+            "error":       f"Binary '{BENCH_REGISTRY[bench_id][0]}' not found. "
+                           f"Run: cmake --build build/ first.",
+            "score":       0.0,
+            "score_unit":  "pts",
+            "metrics":     [],
+            "duration_sec": 0.0,
+        }
+
+    cmd = [str(binary)] + (extra_args or [])
+    t_start = time.monotonic()
+    _timeout = timeout or BENCH_REGISTRY[bench_id][2]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_timeout,
+        )
+        elapsed = time.monotonic() - t_start
+
+        if proc.returncode != 0:
+            return {
+                "bench_id":    bench_id,
+                "bench_name":  BENCH_REGISTRY[bench_id][1],
+                "passed":      False,
+                "error":       f"Exit {proc.returncode}: {proc.stderr[:400]}",
+                "score":       0.0,
+                "score_unit":  "pts",
+                "metrics":     [],
+                "duration_sec": elapsed,
+            }
+
+        result = json.loads(proc.stdout)
+        result.setdefault("duration_sec", elapsed)
+        return result
+
+    except subprocess.TimeoutExpired:
+        return {
+            "bench_id":    bench_id,
+            "bench_name":  BENCH_REGISTRY[bench_id][1],
+            "passed":      False,
+            "error":       f"Timed out after {_timeout}s",
+            "score":       0.0,
+            "score_unit":  "pts",
+            "metrics":     [],
+            "duration_sec": _timeout,
+        }
+    except json.JSONDecodeError as e:
+        raw = proc.stdout[:300] if 'proc' in dir() else ''
+        return {
+            "bench_id":    bench_id,
+            "bench_name":  BENCH_REGISTRY[bench_id][1],
+            "passed":      False,
+            "error":       f"JSON parse error: {e}\nRaw: {raw}",
+            "score":       0.0,
+            "score_unit":  "pts",
+            "metrics":     [],
+            "duration_sec": time.monotonic() - t_start,
+        }
+    except Exception as e:
+        return {
+            "bench_id":    bench_id,
+            "bench_name":  BENCH_REGISTRY[bench_id][1],
+            "passed":      False,
+            "error":       str(e),
+            "score":       0.0,
+            "score_unit":  "pts",
+            "metrics":     [],
+            "duration_sec": 0.0,
+        }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRETTY PRINTER
+# ─────────────────────────────────────────────────────────────────────────────
+BANNER = r"""
+  ___                   _______      ______                  _
+ / _ \ _ __   ___ _ __ |  __ \ \    / / __ )  ___ _ __   ___| |__
+| | | | '_ \ / _ \ '_ \| |__) \ \  / / |  _ \ / _ \ '_ \ / __| '_ \
+| |_| | |_) |  __/ | | |  _  / \ \/ /| |_) |  __/ | | | (__| | | |
+ \___/| .__/ \___|_| |_|_| \_\  \__/|____/ \___|_| |_|\___|_| |_|
+      |_|    RISC-V Benchmark Suite v1.0
+"""
+
+def print_banner():
+    print(cyan(BANNER))
+
+def fmt_metric(m: dict) -> str:
+    val = m.get("value")
+    unit = m.get("unit", "")
+    if isinstance(val, float):
+        val_str = f"{val:.2f}"
+    elif isinstance(val, bool):
+        val_str = "yes" if val else "no"
+    else:
+        val_str = str(val)
+    return f"{val_str} {unit}".strip()
+
+def print_board_info(info: dict):
+    print()
+    print(bold("─── System Information " + "─" * 50))
+    print(f"  {'Board':<18} {cyan(info.get('board', 'unknown'))}")
+    print(f"  {'ISA':<18} {info.get('isa', 'unknown')}")
+    rvv_str = green("✓ RVV available") if info.get("has_rvv") else yellow("✗ No RVV")
+    print(f"  {'Vector Ext':<18} {rvv_str}")
+    print(f"  {'CPU Cores':<18} {info.get('cores', '?')}")
+    print(f"  {'RAM':<18} {info.get('ram_gb', '?')} GB")
+    print(f"  {'Kernel':<18} {info.get('kernel', 'unknown')}")
+    print(f"  {'OS':<18} {info.get('os', 'unknown')}")
+    if "cpu_freq_mhz" in info:
+        print(f"  {'Max CPU Freq':<18} {info['cpu_freq_mhz']} MHz")
+    print()
+
+def print_result_summary(result: dict):
+    bid  = result.get("bench_id",   "?")
+    name = result.get("bench_name", bid)
+    ok   = result.get("passed", False)
+    score     = result.get("score", 0.0)
+    score_unit = result.get("score_unit", "pts")
+    dur  = result.get("duration_sec", 0.0)
+
+    status = green("✓ PASS") if ok else red("✗ FAIL")
+
+    print(f"\n{bold('─── ' + name + ' ' + '─' * max(1, 54 - len(name)))}")
+    print(f"  Status   : {status}   Duration: {dim(f'{dur:.1f}s')}")
+
+    if not ok:
+        print(f"  {red('Error')}    : {result.get('error', '')}")
+        return
+
+    print(f"  {bold('Score')}    : {green(f'{score:.1f}')} {score_unit}")
+
+    metrics = result.get("metrics", [])
+    # Group by pairs for compact display
+    pairs = []
+    for m in metrics:
+        if not isinstance(m.get("value"), bool):
+            pairs.append(m)
+
+    for m in pairs:
+        name_w = m.get("name", "?").replace("_", " ")
+        val    = fmt_metric(m)
+        desc   = m.get("desc", "")
+        print(f"  {dim(name_w + ':'): <30} {val: <16} {dim(desc)}")
+
+def print_full_summary(board_info: dict, all_results: list):
+    print()
+    print(bold("═" * 70))
+    print(bold("  OpenRVBench Results Summary"))
+    print(bold("═" * 70))
+    print(f"  Board    : {cyan(board_info.get('board', 'unknown'))}")
+    print(f"  Date     : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print()
+
+    col_w = 30
+    score_w = 12
+    print(f"  {'Benchmark':<{col_w}} {'Score':>{score_w}}  {'Unit':<8}  Status")
+    print("  " + "─" * 65)
+
+    total_score = 0.0
+    ran = 0
+    for r in all_results:
+        bid   = r.get("bench_id", "?")
+        bname = BENCH_REGISTRY.get(bid, ("", r.get("bench_name", bid), 0))[1]
+        score = r.get("score", 0.0)
+        unit  = r.get("score_unit", "pts")
+        ok    = r.get("passed", False)
+
+        status_sym = green("✓") if ok else red("✗")
+        score_str  = f"{score:.1f}" if ok else "—"
+        print(f"  {bname:<{col_w}} {score_str:>{score_w}}  {unit:<8}  {status_sym}")
+
+        if ok:
+            total_score += score
+            ran += 1
+
+    print("  " + "─" * 65)
+    print(f"  {'Benchmarks run':<{col_w}} {ran:>{score_w}}")
+    print()
+    print(f"  {bold('Overall Score')} : {green(bold(f'{total_score:.1f}'))} pts")
+    print(bold("═" * 70))
+    print()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESULT FILE MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+def results_dir() -> pathlib.Path:
+    p = pathlib.Path(__file__).parent / "results"
+    p.mkdir(exist_ok=True)
+    return p
+
+def save_result(board_info: dict, bench_results: list) -> pathlib.Path:
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = board_info.get("board", "unknown").replace(" ", "_").replace("/", "-")
+    name = re.sub(r"[^\w\-]", "", name)[:30]
+    fname = results_dir() / f"{name}_{ts}.json"
+
+    payload = {
+        "version":     "1.0",
+        "timestamp":   datetime.datetime.now().isoformat(),
+        "board":       board_info,
+        "benchmarks":  bench_results,
+    }
+    fname.write_text(json.dumps(payload, indent=2))
+    return fname
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPARE SUBCOMMAND
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_compare(args):
+    result_path = pathlib.Path(args.path)
+    files = []
+
+    if result_path.is_dir():
+        files = sorted(result_path.glob("*.json"))
+    elif result_path.is_file():
+        files = [result_path]
+    else:
+        print(red(f"Path not found: {result_path}"))
+        sys.exit(1)
+
+    if not files:
+        print(yellow("No result files found."))
+        return
+
+    records = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+            records.append(data)
+        except Exception as e:
+            print(yellow(f"Skip {f.name}: {e}"))
+
+    if not records:
+        print(red("No valid result files."))
+        return
+
+    # Collect all bench IDs
+    bench_ids = []
+    for r in records:
+        for b in r.get("benchmarks", []):
+            bid = b.get("bench_id")
+            if bid and bid not in bench_ids:
+                bench_ids.append(bid)
+
+    # Print comparison table
+    print_banner()
+    print(bold("\n  Benchmark Comparison\n"))
+
+    col = 22
+    header = f"  {'Board':<{col}}"
+    for bid in bench_ids:
+        header += f"  {bid.upper():>10}"
+    print(bold(header))
+    print("  " + "─" * (col + 14 * len(bench_ids)))
+
+    for rec in records:
+        board_name = rec.get("board", {}).get("board", "?")[:col-1]
+        row = f"  {board_name:<{col}}"
+        bench_map = {b["bench_id"]: b for b in rec.get("benchmarks", [])}
+        for bid in bench_ids:
+            b = bench_map.get(bid)
+            if b and b.get("passed"):
+                row += f"  {b['score']:>10.1f}"
+            else:
+                row += f"  {'—':>10}"
+        print(row)
+
+    print()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INFO SUBCOMMAND
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_info(args):
+    print_banner()
+    info = detect_board()
+    print_board_info(info)
+    bench_dir = find_bench_dir()
+    print(bold("─── Available Benchmarks " + "─" * 46))
+    print(f"  Binary search path: {dim(str(bench_dir))}")
+    print()
+    for bid, (bname, desc, timeout) in BENCH_REGISTRY.items():
+        binary = find_binary(bid, bench_dir)
+        avail  = green("✓") if binary else red("✗")
+        path   = str(binary) if binary else yellow("not built")
+        print(f"  {avail} {bold(bid):<12} {desc:<45} {dim(path)}")
+    print()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RUN SUBCOMMAND
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_run(args):
+    print_banner()
+
+    board_info = detect_board()
+    print_board_info(board_info)
+
+    bench_dir = find_bench_dir()
+
+    # Resolve which benchmarks to run
+    target = args.benchmark.lower()
+    if target == "all":
+        to_run = ALL_BENCHES
+    elif target in BENCH_REGISTRY:
+        to_run = [target]
+    else:
+        # Comma-separated list
+        to_run = [b.strip() for b in target.split(",") if b.strip() in BENCH_REGISTRY]
+        if not to_run:
+            print(red(f"Unknown benchmark: '{target}'"))
+            print(f"Available: {', '.join(ALL_BENCHES)}")
+            sys.exit(1)
+
+    # Skip thermal unless explicitly requested
+    if target == "all" and not args.include_thermal:
+        to_run = [b for b in to_run if b != "thermal"]
+        print(yellow("  (thermal benchmark skipped by default — use --include-thermal)"))
+        print()
+
+    extra_args: dict = {}
+    if hasattr(args, "model_dir") and args.model_dir:
+        extra_args["ai"] = [args.model_dir]
+
+    all_results = []
+    total = len(to_run)
+
+    for i, bid in enumerate(to_run, 1):
+        _, desc, _ = BENCH_REGISTRY[bid]
+        print(f"  [{i}/{total}] Running {bold(bid)} — {dim(desc)} ...", flush=True)
+
+        result = run_bench(bid, bench_dir,
+                           extra_args=extra_args.get(bid),
+                           timeout=getattr(args, "timeout", None))
+        all_results.append(result)
+        print_result_summary(result)
+
+    # ── Full summary ──────────────────────────────────────────────────────
+    print_full_summary(board_info, all_results)
+
+    # ── Save results ──────────────────────────────────────────────────────
+    if not getattr(args, "no_save", False):
+        out_path = save_result(board_info, all_results)
+        print(f"  Results saved → {cyan(str(out_path))}")
+
+        # JSON output flag
+        if getattr(args, "json", False):
+            print()
+            print(json.dumps({"board": board_info, "benchmarks": all_results},
+                             indent=2))
+
+        # HTML report
+        if getattr(args, "html", None):
+            from scripts.report_generator import generate_html_report
+            html_path = pathlib.Path(args.html)
+            generate_html_report(board_info, all_results, html_path)
+            print(f"  HTML report   → {cyan(str(html_path))}")
+
+    print()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT SUBCOMMAND
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_report(args):
+    src = pathlib.Path(args.result_file)
+    if not src.exists():
+        print(red(f"File not found: {src}"))
+        sys.exit(1)
+
+    data = json.loads(src.read_text())
+    out  = pathlib.Path(args.output) if args.output else src.with_suffix(".html")
+
+    # Import lazily so CLI works even without full Python env
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from scripts.report_generator import generate_html_report
+
+    generate_html_report(data.get("board", {}),
+                         data.get("benchmarks", []),
+                         out)
+    print(green(f"HTML report written → {out}"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEADERBOARD SUBCOMMAND
+# ─────────────────────────────────────────────────────────────────────────────
+def cmd_leaderboard(args):
+    result_path = pathlib.Path(args.path)
+    files = sorted(result_path.glob("*.json")) if result_path.is_dir() else [result_path]
+
+    records = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+            total = sum(b.get("score", 0) for b in data.get("benchmarks", [])
+                        if b.get("passed"))
+            records.append({
+                "board": data.get("board", {}).get("board", "?"),
+                "isa":   data.get("board", {}).get("isa", "?"),
+                "cores": data.get("board", {}).get("cores", 0),
+                "ram":   data.get("board", {}).get("ram_gb", 0),
+                "total": total,
+                "date":  data.get("timestamp", "?")[:10],
+                "file":  f.name,
+            })
+        except Exception:
+            pass
+
+    records.sort(key=lambda x: x["total"], reverse=True)
+
+    print_banner()
+    print(bold("\n  🏆  OpenRVBench Leaderboard\n"))
+    print(f"  {'#':<4} {'Board':<30} {'Score':>10}  {'ISA':<16} {'Cores':>6}  Date")
+    print("  " + "─" * 76)
+    for rank, rec in enumerate(records, 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
+        print(f"  {medal:<4} {rec['board']:<30} "
+              f"{rec['total']:>10.1f}  {rec['isa']:<16} "
+              f"{rec['cores']:>6}  {rec['date']}")
+    print()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARGUMENT PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="openrvbench",
+        description="OpenRVBench — RISC-V Benchmark Suite",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+        Examples:
+          openrvbench run all
+          openrvbench run cpu
+          openrvbench run cpu,memory,crypto
+          openrvbench run ai --model-dir /path/to/models
+          openrvbench run all --include-thermal --html report.html
+          openrvbench compare results/
+          openrvbench report results/OrangePiRV2_20250301.json
+          openrvbench leaderboard results/
+          openrvbench info
+        """),
+    )
+    sub = p.add_subparsers(dest="command")
+
+    # run
+    run_p = sub.add_parser("run", help="Run benchmarks")
+    run_p.add_argument("benchmark",
+                       nargs="?", default="all",
+                       help="Benchmark to run: all, cpu, vector, memory, "
+                            "crypto, storage, network, ai, thermal, or comma-list")
+    run_p.add_argument("--include-thermal", action="store_true",
+                       help="Include thermal benchmark (60s stress test)")
+    run_p.add_argument("--model-dir", metavar="DIR",
+                       help="Directory containing AI model files")
+    run_p.add_argument("--timeout", type=int, default=None,
+                       help="Override timeout (seconds) for each benchmark")
+    run_p.add_argument("--no-save", action="store_true",
+                       help="Don't save results to disk")
+    run_p.add_argument("--json", action="store_true",
+                       help="Also print full JSON to stdout after run")
+    run_p.add_argument("--html", metavar="FILE",
+                       help="Generate HTML report at this path")
+
+    # compare
+    cmp_p = sub.add_parser("compare", help="Compare result files")
+    cmp_p.add_argument("path", help="Result file or directory of .json files")
+
+    # report
+    rep_p = sub.add_parser("report", help="Generate HTML report from result JSON")
+    rep_p.add_argument("result_file", help="Path to result .json file")
+    rep_p.add_argument("-o", "--output", metavar="FILE",
+                       help="Output HTML file (default: same dir as input)")
+
+    # leaderboard
+    lb_p = sub.add_parser("leaderboard", help="Show ranked leaderboard from results")
+    lb_p.add_argument("path", nargs="?", default="results/",
+                      help="Results directory (default: results/)")
+
+    # info
+    sub.add_parser("info", help="Show system information and available benchmarks")
+
+    return p
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "run":
+        cmd_run(args)
+    elif args.command == "compare":
+        cmd_compare(args)
+    elif args.command == "report":
+        cmd_report(args)
+    elif args.command == "leaderboard":
+        cmd_leaderboard(args)
+    elif args.command == "info":
+        cmd_info(args)
+    else:
+        print_banner()
+        parser.print_help()
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()

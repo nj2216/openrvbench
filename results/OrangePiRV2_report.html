@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenRVBench — Orange Pi RV2</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:       #0f172a;
+    --surface:  #1e293b;
+    --border:   #334155;
+    --text:     #e2e8f0;
+    --muted:    #94a3b8;
+    --green:    #4ade80;
+    --yellow:   #facc15;
+    --red:      #f87171;
+    --blue:     #60a5fa;
+    --purple:   #a78bfa;
+    --cyan:     #67e8f9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh; padding: 2rem;
+  }
+  a { color: var(--blue); text-decoration: none; }
+
+  /* Header */
+  .header {
+    display: flex; align-items: center; gap: 1.5rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.5rem; margin-bottom: 2rem;
+  }
+  .logo { font-size: 2.5rem; }
+  .title-block h1 { font-size: 1.8rem; color: var(--cyan); font-weight: 700; }
+  .title-block p  { color: var(--muted); font-size: 0.85rem; margin-top: 0.25rem; }
+
+  /* System info */
+  .sysinfo {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem; margin-bottom: 2rem;
+  }
+  .sysinfo-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem;
+  }
+  .sysinfo-card .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+  .sysinfo-card .value { font-size: 1.0rem; color: var(--text); margin-top: 0.3rem; font-weight: 600; }
+
+  /* Badges */
+  .badge-green  { color: var(--green);  }
+  .badge-yellow { color: var(--yellow); }
+  .badge-red    { color: var(--red);    }
+
+  /* Score hero */
+  .score-hero {
+    text-align: center; padding: 2rem;
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border: 1px solid var(--border); border-radius: 12px;
+    margin-bottom: 2rem;
+  }
+  .score-hero .big-score { font-size: 4rem; font-weight: 800; color: var(--cyan); }
+  .score-hero .score-label { color: var(--muted); margin-top: 0.5rem; }
+  .score-hero .pass-info { color: var(--muted); margin-top: 0.5rem; font-size: 0.85rem; }
+
+  /* Charts */
+  .charts-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 1.5rem; margin-bottom: 2rem;
+  }
+  @media(max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.5rem;
+  }
+  .chart-card h3 {
+    font-size: 0.85rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 1rem;
+  }
+
+  /* Benchmark cards */
+  .section-title {
+    font-size: 0.8rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 1rem; margin-top: 2rem;
+    border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+  }
+  .bench-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+    gap: 1.5rem;
+  }
+  @media(max-width: 600px) { .bench-grid { grid-template-columns: 1fr; } }
+  .bench-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1.25rem;
+    border-left: 3px solid var(--border);
+  }
+  .bench-card.pass { border-left-color: var(--green); }
+  .bench-card.fail { border-left-color: var(--red);   }
+
+  .bench-header {
+    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem;
+  }
+  .bench-icon   { font-size: 1.25rem; }
+  .bench-name   { font-weight: 700; font-size: 0.95rem; flex: 1; }
+  .bench-status { font-size: 0.7rem; font-weight: 700; padding: 0.2rem 0.5rem;
+                   border-radius: 4px; }
+  .bench-status.pass { background: rgba(74,222,128,0.15); color: var(--green); }
+  .bench-status.fail { background: rgba(248,113,113,0.15); color: var(--red); }
+
+  .bench-score  {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+  .score-num    { font-size: 2rem; font-weight: 800; color: var(--cyan); }
+  .score-unit   { font-size: 0.85rem; color: var(--muted); }
+  .bench-dur    { font-size: 0.75rem; color: var(--muted); margin-left: auto; }
+  .bench-error  {
+    font-size: 0.8rem; color: var(--red);
+    background: rgba(248,113,113,0.05);
+    border: 1px solid rgba(248,113,113,0.2);
+    padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem;
+  }
+
+  /* Metrics table */
+  .metric-table {
+    width: 100%; border-collapse: collapse; font-size: 0.78rem;
+    margin-top: 0.5rem;
+  }
+  .metric-table th {
+    text-align: left; padding: 0.3rem 0.5rem;
+    color: var(--muted); font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.7rem; text-transform: uppercase;
+  }
+  .metric-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid rgba(51,65,85,0.5); }
+  .metric-table .mv { color: var(--cyan); font-weight: 600; }
+  .metric-table .mu { color: var(--muted); }
+  .metric-table .md { color: var(--muted); font-style: italic; }
+
+  /* Footer */
+  .footer {
+    text-align: center; color: var(--muted); font-size: 0.75rem;
+    margin-top: 3rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">🖥️</div>
+  <div class="title-block">
+    <h1>OpenRVBench</h1>
+    <p>RISC-V Benchmark Suite v1.0 &nbsp;·&nbsp; 2026-03-16 05:42</p>
+  </div>
+</div>
+
+<!-- System Info -->
+<div class="sysinfo">
+  <div class="sysinfo-card">
+    <div class="label">Board</div>
+    <div class="value">Orange Pi RV2</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">ISA</div>
+    <div class="value">rv64gcv_zicsr_zifencei_zba_zbb_zbc_zbs_zbkb_zbkc_zbkx_zknd_zkne_zknh_zksed_zksh_zkt</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">Vector Ext</div>
+    <div class="value badge-green">✓ RVV</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">CPU Cores</div>
+    <div class="value">8</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">RAM</div>
+    <div class="value">4.0 GB</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">Kernel</div>
+    <div class="value">6.1.57-orangepi-riscv</div>
+  </div>
+  <div class="sysinfo-card">
+    <div class="label">OS</div>
+    <div class="value">Ubuntu 23.10 (RISC-V)</div>
+  </div>
+</div>
+
+<!-- Score Hero -->
+<div class="score-hero">
+  <div class="big-score">10760</div>
+  <div class="score-label">Overall Score (pts)</div>
+  <div class="pass-info">8 of 8 benchmarks passed</div>
+</div>
+
+<!-- Charts -->
+<div class="charts-grid">
+  <div class="chart-card">
+    <h3>Performance Radar (%age of baseline)</h3>
+    <canvas id="radarChart" height="260"></canvas>
+  </div>
+  <div class="chart-card">
+    <h3>Score by Category</h3>
+    <canvas id="barChart" height="260"></canvas>
+  </div>
+</div>
+
+<!-- Benchmark Detail Cards -->
+<div class="section-title">Detailed Results</div>
+<div class="bench-grid">
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">⚙️</span>
+    <span class="bench-name">CPU Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">1120.0</span>
+    <span class="score-unit">pts</span>
+    <span class="bench-dur">(14.2s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Integer Mops</td><td class="mv">312.50</td><td class="mu">MOPS</td><td class="md">Integer arithmetic throughput</td></tr>
+<tr><td class="mn">Fp Gflops</td><td class="mv">0.82</td><td class="mu">GFLOPS</td><td class="md">FP throughput (Mandelbrot)</td></tr>
+<tr><td class="mn">Mt Single Mops</td><td class="mv">290.00</td><td class="mu">MOPS</td><td class="md">Single-thread</td></tr>
+<tr><td class="mn">Mt Multi Mops</td><td class="mv">2100.00</td><td class="mu">MOPS</td><td class="md">8-thread throughput</td></tr>
+<tr><td class="mn">Mt Scaling Factor</td><td class="mv">7.24</td><td class="mu">x</td><td class="md">Multi-thread scaling</td></tr>
+<tr><td class="mn">Thread Count</td><td class="mv">8</td><td class="mu">cores</td><td class="md">Logical cores</td></tr>
+<tr><td class="mn">Compression Mbs</td><td class="mv">245.00</td><td class="mu">MB/s</td><td class="md">LZ77-style compression</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">🧮</span>
+    <span class="bench-name">Vector Extension Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">420.0</span>
+    <span class="score-unit">pts</span>
+    <span class="bench-dur">(9.8s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Saxpy Scalar Gbs</td><td class="mv">4.80</td><td class="mu">GB/s</td><td class="md">SAXPY scalar</td></tr>
+<tr><td class="mn">Saxpy Vector Gbs</td><td class="mv">13.40</td><td class="mu">GB/s</td><td class="md">SAXPY vectorised</td></tr>
+<tr><td class="mn">Saxpy Speedup</td><td class="mv">2.79</td><td class="mu">x</td><td class="md">Vector vs scalar speedup</td></tr>
+<tr><td class="mn">Matmul Scalar Gflops</td><td class="mv">1.05</td><td class="mu">GFLOPS</td><td class="md">Matmul scalar</td></tr>
+<tr><td class="mn">Matmul Vector Gflops</td><td class="mv">3.12</td><td class="mu">GFLOPS</td><td class="md">Matmul RVV</td></tr>
+<tr><td class="mn">Matmul Speedup</td><td class="mv">2.97</td><td class="mu">x</td><td class="md">Matmul vector speedup</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">💾</span>
+    <span class="bench-name">Memory Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">1840.0</span>
+    <span class="score-unit">pts</span>
+    <span class="bench-dur">(21.4s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Read Bandwidth Gbs</td><td class="mv">5.21</td><td class="mu">GB/s</td><td class="md">Sequential read</td></tr>
+<tr><td class="mn">Write Bandwidth Gbs</td><td class="mv">4.87</td><td class="mu">GB/s</td><td class="md">Sequential write</td></tr>
+<tr><td class="mn">Copy Bandwidth Gbs</td><td class="mv">4.63</td><td class="mu">GB/s</td><td class="md">Memory copy</td></tr>
+<tr><td class="mn">L1 Latency Ns</td><td class="mv">1.80</td><td class="mu">ns</td><td class="md">L1 cache latency</td></tr>
+<tr><td class="mn">L2 Latency Ns</td><td class="mv">5.20</td><td class="mu">ns</td><td class="md">L2 cache latency</td></tr>
+<tr><td class="mn">Llc Latency Ns</td><td class="mv">18.40</td><td class="mu">ns</td><td class="md">LLC latency</td></tr>
+<tr><td class="mn">Dram Latency Ns</td><td class="mv">98.70</td><td class="mu">ns</td><td class="md">DRAM latency</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">🔐</span>
+    <span class="bench-name">Cryptography Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">650.0</span>
+    <span class="score-unit">MB/s</span>
+    <span class="bench-dur">(9.1s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Aes256 Mbs</td><td class="mv">820.00</td><td class="mu">MB/s</td><td class="md">AES-256 CTR</td></tr>
+<tr><td class="mn">Sha256 Mbs</td><td class="mv">510.00</td><td class="mu">MB/s</td><td class="md">SHA-256</td></tr>
+<tr><td class="mn">Chacha20 Mbs</td><td class="mv">930.00</td><td class="mu">MB/s</td><td class="md">ChaCha20</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">📀</span>
+    <span class="bench-name">Storage Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">380.0</span>
+    <span class="score-unit">MB/s</span>
+    <span class="bench-dur">(45.3s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Seq Write Mbs</td><td class="mv">320.00</td><td class="mu">MB/s</td><td class="md">Sequential write</td></tr>
+<tr><td class="mn">Seq Read Mbs</td><td class="mv">440.00</td><td class="mu">MB/s</td><td class="md">Sequential read</td></tr>
+<tr><td class="mn">Rand Read Iops</td><td class="mv">28500.00</td><td class="mu">IOPS</td><td class="md">Random 4K read</td></tr>
+<tr><td class="mn">Rand Read Lat Us</td><td class="mv">35.10</td><td class="mu">µs</td><td class="md">Random 4K latency</td></tr>
+<tr><td class="mn">Rand Write Iops</td><td class="mv">18200.00</td><td class="mu">IOPS</td><td class="md">Random 4K write</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">🌐</span>
+    <span class="bench-name">Network Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">4820.0</span>
+    <span class="score-unit">MB/s</span>
+    <span class="bench-dur">(6.2s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Tcp Loopback Mbs</td><td class="mv">4820.00</td><td class="mu">MB/s</td><td class="md">TCP loopback</td></tr>
+<tr><td class="mn">Udp Loopback Lat Us</td><td class="mv">41.30</td><td class="mu">µs</td><td class="md">UDP RTT latency</td></tr>
+<tr><td class="mn">Udp Loopback Pps</td><td class="mv">24213.00</td><td class="mu">pps</td><td class="md">Packets per second</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">🤖</span>
+    <span class="bench-name">AI Inference Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">720.0</span>
+    <span class="score-unit">pts</span>
+    <span class="bench-dur">(31.5s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Gemm Proxy Gflops</td><td class="mv">3.80</td><td class="mu">GFLOPS</td><td class="md">Tiled FP32 GEMM proxy</td></tr>
+<tr><td class="mn">Tinyllama Prompt Tps</td><td class="mv">45.00</td><td class="mu">tok/s</td><td class="md">TinyLlama prompt speed</td></tr>
+<tr><td class="mn">Tinyllama Gen Tps</td><td class="mv">12.00</td><td class="mu">tok/s</td><td class="md">TinyLlama generation</td></tr>
+<tr><td class="mn">Llama Threads</td><td class="mv">8</td><td class="mu">threads</td><td class="md">Threads used</td></tr>
+<tr><td class="mn">Mobilenet Ips</td><td class="mv">28.40</td><td class="mu">inf/s</td><td class="md">MobileNetV2 inferences/s</td></tr>
+<tr><td class="mn">Mobilenet Lat Ms</td><td class="mv">35.20</td><td class="mu">ms</td><td class="md">MobileNetV2 latency</td></tr></table>
+</div>
+
+<div class="bench-card pass">
+  <div class="bench-header">
+    <span class="bench-icon">🌡️</span>
+    <span class="bench-name">Thermal Benchmark</span>
+    <span class="bench-status pass">PASS</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">810.0</span>
+    <span class="score-unit">pts</span>
+    <span class="bench-dur">(82.1s)</span>
+  </div>
+  
+  <table class="metric-table"><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr><tr><td class="mn">Stress Threads</td><td class="mv">8</td><td class="mu">threads</td><td class="md">Stress threads</td></tr>
+<tr><td class="mn">Idle Temp C</td><td class="mv">38.50</td><td class="mu">°C</td><td class="md">Idle temperature</td></tr>
+<tr><td class="mn">Peak Temp C</td><td class="mv">79.00</td><td class="mu">°C</td><td class="md">Peak temperature</td></tr>
+<tr><td class="mn">Avg Temp C</td><td class="mv">73.20</td><td class="mu">°C</td><td class="md">Average under stress</td></tr>
+<tr><td class="mn">Temp Rise C</td><td class="mv">34.70</td><td class="mu">°C</td><td class="md">Temperature rise</td></tr>
+<tr><td class="mn">Avg Freq Mhz</td><td class="mv">1480.00</td><td class="mu">MHz</td><td class="md">Average frequency</td></tr>
+<tr><td class="mn">Throttle Pct</td><td class="mv">8.50</td><td class="mu">%</td><td class="md">Time throttled</td></tr>
+<tr><td class="mn">Cooldown 10S Temp C</td><td class="mv">52.00</td><td class="mu">°C</td><td class="md">Temp after 10s cooldown</td></tr></table>
+</div>
+</div>
+
+<div class="footer">
+  Generated by <strong>OpenRVBench v1.0</strong> &nbsp;·&nbsp;
+  <a href="https://github.com/your-org/openrvbench">github.com/your-org/openrvbench</a>
+  &nbsp;·&nbsp; 2026-03-16 05:42
+</div>
+
+<script>
+const radarLabels = ["CPU", "VECTOR", "MEMORY", "CRYPTO", "STORAGE", "NETWORK", "AI", "THERMAL"];
+const radarValues = [56.0, 84.0, 92.0, 100.0, 38.0, 96.4, 72.0, 90.0];
+const barLabels   = ["CPU", "VECTOR", "MEMORY", "CRYPTO", "STORAGE", "NETWORK", "AI", "THERMAL"];
+const barScores   = [1120.0, 420.0, 1840.0, 650.0, 380.0, 4820.0, 720.0, 810.0];
+const barColors   = ["#6ee7b7", "#93c5fd", "#fcd34d", "#f9a8d4", "#a5b4fc", "#6d28d9", "#f87171", "#34d399"];
+
+const chartDefaults = {
+  color: '#94a3b8',
+  borderColor: '#334155',
+};
+Chart.defaults.color = '#94a3b8';
+
+// Radar
+new Chart(document.getElementById('radarChart'), {
+  type: 'radar',
+  data: {
+    labels: radarLabels,
+    datasets: [{
+      label: 'Score %',
+      data: radarValues,
+      backgroundColor: 'rgba(103,232,249,0.15)',
+      borderColor: '#67e8f9',
+      pointBackgroundColor: '#67e8f9',
+      pointRadius: 4,
+      borderWidth: 2,
+    }]
+  },
+  options: {
+    responsive: true,
+    scales: {
+      r: {
+        min: 0, max: 100,
+        grid:       { color: '#334155' },
+        angleLines: { color: '#334155' },
+        ticks:      { color: '#94a3b8', backdropColor: 'transparent',
+                       stepSize: 25 },
+        pointLabels: { color: '#e2e8f0', font: { size: 11 } },
+      }
+    },
+    plugins: { legend: { display: false } }
+  }
+});
+
+// Bar
+new Chart(document.getElementById('barChart'), {
+  type: 'bar',
+  data: {
+    labels: barLabels,
+    datasets: [{
+      label: 'Score',
+      data: barScores,
+      backgroundColor: barColors,
+      borderRadius: 4,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+      y: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+    }
+  }
+});
+</script>
+</body>
+</html>
