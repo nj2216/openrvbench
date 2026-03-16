@@ -361,8 +361,16 @@ def print_full_summary(board_info: dict, all_results: list):
 # RESULT FILE MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 def results_dir() -> pathlib.Path:
-    p = pathlib.Path(__file__).parent / "results"
-    p.mkdir(exist_ok=True)
+    # Prefer XDG_DATA_HOME if set, otherwise ~/.local/share/openrvbench/results
+    # This is safe whether the CLI is run as root (saves to /root/...) or a
+    # normal user, and never writes into /usr/local/bin/.
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    if xdg:
+        base = pathlib.Path(xdg)
+    else:
+        base = pathlib.Path.home() / ".local" / "share"
+    p = base / "openrvbench" / "results"
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
 def save_result(board_info: dict, bench_results: list) -> pathlib.Path:
@@ -526,7 +534,6 @@ def cmd_run(args):
 
         # HTML report
         if getattr(args, "html", None):
-            from scripts.report_generator import generate_html_report
             html_path = pathlib.Path(args.html)
             generate_html_report(board_info, all_results, html_path)
             print(f"  HTML report   → {cyan(str(html_path))}")
@@ -545,14 +552,262 @@ def cmd_report(args):
     data = json.loads(src.read_text())
     out  = pathlib.Path(args.output) if args.output else src.with_suffix(".html")
 
-    # Import lazily so CLI works even without full Python env
-    sys.path.insert(0, str(pathlib.Path(__file__).parent))
-    from scripts.report_generator import generate_html_report
-
     generate_html_report(data.get("board", {}),
                          data.get("benchmarks", []),
                          out)
     print(green(f"HTML report written → {out}"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTML REPORT GENERATOR  (inlined — no external scripts/ dependency)
+# Works correctly whether the CLI is run from source or installed to /usr/local/bin
+# ─────────────────────────────────────────────────────────────────────────────
+_SCORE_BASELINES = {
+    "cpu": 2000.0, "vector": 500.0, "memory": 2000.0, "crypto": 500.0,
+    "storage": 1000.0, "network": 5000.0, "ai": 1000.0, "thermal": 900.0,
+}
+
+def _rpt_fmt(v, precision=2):
+    if isinstance(v, float): return f"{v:.{precision}f}"
+    if isinstance(v, bool):  return "yes" if v else "no"
+    return str(v)
+
+def _metric_rows(metrics: list) -> str:
+    rows = []
+    for m in metrics:
+        name = m.get("name", "").replace("_", " ").title()
+        val  = _rpt_fmt(m.get("value", ""))
+        unit = m.get("unit", "")
+        desc = m.get("desc", "")
+        rows.append(
+            f'<tr><td class="mn">{name}</td>'
+            f'<td class="mv">{val}</td>'
+            f'<td class="mu">{unit}</td>'
+            f'<td class="md">{desc}</td></tr>'
+        )
+    return "\n".join(rows)
+
+def _bench_cards(bench_results: list) -> str:
+    import json as _json
+    cards = []
+    icons = {"cpu":"⚙️","vector":"🧮","memory":"💾","crypto":"🔐",
+             "storage":"📀","network":"🌐","ai":"🤖","thermal":"🌡️"}
+    for r in bench_results:
+        bid   = r.get("bench_id", "?")
+        bname = r.get("bench_name", bid)
+        ok_   = r.get("passed", False)
+        score = r.get("score", 0.0)
+        unit  = r.get("score_unit", "pts")
+        dur   = r.get("duration_sec", 0.0)
+        err   = r.get("error", "")
+        scls  = "pass" if ok_ else "fail"
+        stxt  = "PASS" if ok_ else "FAIL"
+        icon  = icons.get(bid, "📊")
+
+        err_html = f'<div class="bench-error">{err}</div>' if not ok_ and err else ""
+
+        metric_html = ""
+        if ok_:
+            visible = [m for m in r.get("metrics", [])
+                       if not isinstance(m.get("value"), bool)][:8]
+            if visible:
+                metric_html = (
+                    '<table class="metric-table">'
+                    '<tr><th>Metric</th><th>Value</th><th>Unit</th><th>Description</th></tr>'
+                    + _metric_rows(visible) + '</table>'
+                )
+
+        cards.append(f'''
+<div class="bench-card {scls}">
+  <div class="bench-header">
+    <span class="bench-icon">{icon}</span>
+    <span class="bench-name">{bname}</span>
+    <span class="bench-status {scls}">{stxt}</span>
+  </div>
+  <div class="bench-score">
+    <span class="score-num">{_rpt_fmt(score, 1)}</span>
+    <span class="score-unit">{unit}</span>
+    <span class="bench-dur">({dur:.1f}s)</span>
+  </div>
+  {err_html}
+  {metric_html}
+</div>''')
+    return "\n".join(cards)
+
+def generate_html_report(board_info: dict, bench_results: list,
+                          output_path) -> pathlib.Path:
+    """Write a self-contained dark-mode HTML report. No external deps required."""
+    import json as _json
+
+    board_name = board_info.get("board", "Unknown Board")
+    isa        = board_info.get("isa",   "unknown")
+    cores      = board_info.get("cores", "?")
+    ram        = board_info.get("ram_gb", "?")
+    kernel     = board_info.get("kernel", "?")
+    os_str     = board_info.get("os",    "?")
+    has_rvv    = board_info.get("has_rvv", False)
+    rvv_badge  = "✓ RVV" if has_rvv else "✗ No RVV"
+    rvv_cls    = "badge-green" if has_rvv else "badge-yellow"
+    date_str   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    total_score = sum(r.get("score", 0) for r in bench_results if r.get("passed"))
+    n_pass      = sum(1 for r in bench_results if r.get("passed"))
+    n_total     = len(bench_results)
+    bench_cards = _bench_cards(bench_results)
+
+    # Radar data
+    r_labels, r_values = [], []
+    for r in bench_results:
+        bid   = r.get("bench_id", "")
+        score = r.get("score", 0.0) if r.get("passed") else 0.0
+        base  = _SCORE_BASELINES.get(bid, 1000.0)
+        r_labels.append(bid.upper())
+        r_values.append(round(min(100.0, score / base * 100.0), 1))
+
+    # Bar data
+    palette = ["#6ee7b7","#93c5fd","#fcd34d","#f9a8d4",
+               "#a5b4fc","#6d28d9","#f87171","#34d399"]
+    b_labels, b_scores, b_colors = [], [], []
+    for i, r in enumerate(bench_results):
+        if r.get("passed"):
+            b_labels.append(r.get("bench_id","?").upper())
+            b_scores.append(round(r.get("score", 0.0), 1))
+            b_colors.append(palette[i % len(palette)])
+
+    radar_labels = _json.dumps(r_labels)
+    radar_values = _json.dumps(r_values)
+    bar_labels   = _json.dumps(b_labels)
+    bar_scores   = _json.dumps(b_scores)
+    bar_colors   = _json.dumps(b_colors)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenRVBench — {board_name}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root{{--bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;
+        --muted:#94a3b8;--green:#4ade80;--yellow:#facc15;--red:#f87171;
+        --blue:#60a5fa;--cyan:#67e8f9;}}
+  *{{box-sizing:border-box;margin:0;padding:0;}}
+  body{{font-family:'JetBrains Mono','Fira Code',monospace;background:var(--bg);
+        color:var(--text);min-height:100vh;padding:2rem;}}
+  .header{{display:flex;align-items:center;gap:1.5rem;border-bottom:1px solid var(--border);
+           padding-bottom:1.5rem;margin-bottom:2rem;}}
+  .logo{{font-size:2.5rem;}}
+  .title-block h1{{font-size:1.8rem;color:var(--cyan);font-weight:700;}}
+  .title-block p{{color:var(--muted);font-size:.85rem;margin-top:.25rem;}}
+  .sysinfo{{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+            gap:1rem;margin-bottom:2rem;}}
+  .sysinfo-card{{background:var(--surface);border:1px solid var(--border);
+                 border-radius:8px;padding:1rem;}}
+  .sysinfo-card .label{{font-size:.7rem;color:var(--muted);text-transform:uppercase;}}
+  .sysinfo-card .value{{font-size:1rem;color:var(--text);margin-top:.3rem;font-weight:600;}}
+  .badge-green{{color:var(--green);}} .badge-yellow{{color:var(--yellow);}}
+  .score-hero{{text-align:center;padding:2rem;background:linear-gradient(135deg,#1e293b,#0f172a);
+               border:1px solid var(--border);border-radius:12px;margin-bottom:2rem;}}
+  .score-hero .big-score{{font-size:4rem;font-weight:800;color:var(--cyan);}}
+  .score-hero .score-label,.score-hero .pass-info{{color:var(--muted);margin-top:.5rem;}}
+  .score-hero .pass-info{{font-size:.85rem;}}
+  .charts-grid{{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:2rem;}}
+  @media(max-width:768px){{.charts-grid{{grid-template-columns:1fr;}}}}
+  .chart-card{{background:var(--surface);border:1px solid var(--border);
+               border-radius:12px;padding:1.5rem;}}
+  .chart-card h3{{font-size:.85rem;color:var(--muted);text-transform:uppercase;
+                  letter-spacing:.1em;margin-bottom:1rem;}}
+  .section-title{{font-size:.8rem;color:var(--muted);text-transform:uppercase;
+                  letter-spacing:.1em;margin-bottom:1rem;margin-top:2rem;
+                  border-bottom:1px solid var(--border);padding-bottom:.5rem;}}
+  .bench-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(480px,1fr));gap:1.5rem;}}
+  @media(max-width:600px){{.bench-grid{{grid-template-columns:1fr;}}}}
+  .bench-card{{background:var(--surface);border:1px solid var(--border);
+               border-radius:10px;padding:1.25rem;border-left:3px solid var(--border);}}
+  .bench-card.pass{{border-left-color:var(--green);}} .bench-card.fail{{border-left-color:var(--red);}}
+  .bench-header{{display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem;}}
+  .bench-icon{{font-size:1.25rem;}} .bench-name{{font-weight:700;font-size:.95rem;flex:1;}}
+  .bench-status{{font-size:.7rem;font-weight:700;padding:.2rem .5rem;border-radius:4px;}}
+  .bench-status.pass{{background:rgba(74,222,128,.15);color:var(--green);}}
+  .bench-status.fail{{background:rgba(248,113,113,.15);color:var(--red);}}
+  .bench-score{{display:flex;align-items:baseline;gap:.5rem;margin-bottom:.75rem;}}
+  .score-num{{font-size:2rem;font-weight:800;color:var(--cyan);}}
+  .score-unit{{font-size:.85rem;color:var(--muted);}}
+  .bench-dur{{font-size:.75rem;color:var(--muted);margin-left:auto;}}
+  .bench-error{{font-size:.8rem;color:var(--red);background:rgba(248,113,113,.05);
+                border:1px solid rgba(248,113,113,.2);padding:.5rem;border-radius:4px;margin-top:.5rem;}}
+  .metric-table{{width:100%;border-collapse:collapse;font-size:.78rem;margin-top:.5rem;}}
+  .metric-table th{{text-align:left;padding:.3rem .5rem;color:var(--muted);font-weight:600;
+                    border-bottom:1px solid var(--border);font-size:.7rem;text-transform:uppercase;}}
+  .metric-table td{{padding:.3rem .5rem;border-bottom:1px solid rgba(51,65,85,.5);}}
+  .metric-table .mv{{color:var(--cyan);font-weight:600;}}
+  .metric-table .mu,.metric-table .md{{color:var(--muted);}}
+  .metric-table .md{{font-style:italic;}}
+  .footer{{text-align:center;color:var(--muted);font-size:.75rem;
+           margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--border);}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">🖥️</div>
+  <div class="title-block">
+    <h1>OpenRVBench</h1>
+    <p>RISC-V Benchmark Suite v1.0.1 &nbsp;·&nbsp; {date_str}</p>
+  </div>
+</div>
+<div class="sysinfo">
+  <div class="sysinfo-card"><div class="label">Board</div><div class="value">{board_name}</div></div>
+  <div class="sysinfo-card"><div class="label">ISA</div><div class="value" style="font-size:.7rem;word-break:break-all">{isa}</div></div>
+  <div class="sysinfo-card"><div class="label">Vector Ext</div><div class="value {rvv_cls}">{rvv_badge}</div></div>
+  <div class="sysinfo-card"><div class="label">CPU Cores</div><div class="value">{cores}</div></div>
+  <div class="sysinfo-card"><div class="label">RAM</div><div class="value">{ram} GB</div></div>
+  <div class="sysinfo-card"><div class="label">Kernel</div><div class="value">{kernel}</div></div>
+  <div class="sysinfo-card"><div class="label">OS</div><div class="value">{os_str}</div></div>
+</div>
+<div class="score-hero">
+  <div class="big-score">{total_score:.0f}</div>
+  <div class="score-label">Overall Score (pts)</div>
+  <div class="pass-info">{n_pass} of {n_total} benchmarks passed</div>
+</div>
+<div class="charts-grid">
+  <div class="chart-card"><h3>Performance Radar (% of baseline)</h3>
+    <canvas id="radarChart" height="260"></canvas></div>
+  <div class="chart-card"><h3>Score by Category</h3>
+    <canvas id="barChart" height="260"></canvas></div>
+</div>
+<div class="section-title">Detailed Results</div>
+<div class="bench-grid">{bench_cards}</div>
+<div class="footer">
+  Generated by <strong>OpenRVBench v1.0.1</strong> &nbsp;·&nbsp; {date_str}
+</div>
+<script>
+Chart.defaults.color='#94a3b8';
+new Chart(document.getElementById('radarChart'),{{
+  type:'radar',
+  data:{{labels:{radar_labels},datasets:[{{label:'Score %',data:{radar_values},
+    backgroundColor:'rgba(103,232,249,.15)',borderColor:'#67e8f9',
+    pointBackgroundColor:'#67e8f9',pointRadius:4,borderWidth:2}}]}},
+  options:{{responsive:true,scales:{{r:{{min:0,max:100,
+    grid:{{color:'#334155'}},angleLines:{{color:'#334155'}},
+    ticks:{{color:'#94a3b8',backdropColor:'transparent',stepSize:25}},
+    pointLabels:{{color:'#e2e8f0',font:{{size:11}}}}}}}},
+    plugins:{{legend:{{display:false}}}}}}
+}});
+new Chart(document.getElementById('barChart'),{{
+  type:'bar',
+  data:{{labels:{bar_labels},datasets:[{{label:'Score',data:{bar_scores},
+    backgroundColor:{bar_colors},borderRadius:4}}]}},
+  options:{{responsive:true,plugins:{{legend:{{display:false}}}},
+    scales:{{x:{{grid:{{color:'#334155'}},ticks:{{color:'#94a3b8'}}}},
+             y:{{grid:{{color:'#334155'}},ticks:{{color:'#94a3b8'}}}}}}}}
+}});
+</script>
+</body>
+</html>"""
+
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    return output_path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LEADERBOARD SUBCOMMAND
