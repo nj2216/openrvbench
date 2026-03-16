@@ -524,7 +524,7 @@ static ExtResult bench_Zbc(bool detected) {
         while (elapsed(t0) < BENCH_SECS) {
 #if defined(__riscv_zbc)
             for (int i = 0; i < N; ++i)
-                out[i] = __builtin_riscv_clmul(a[i], b[i]);
+                out[i] = __builtin_riscv_clmul_64(a[i], b[i]);
 #else
             // Compiler may still vectorise/optimise the known pattern
             for (int i = 0; i < N; ++i) out[i] = sw_clmul(a[i], b[i]);
@@ -617,7 +617,7 @@ static ExtResult bench_Zfh(bool detected) {
 #if defined(__riscv_zfh) || defined(__riscv_f16)
     r.ran = true;
     const int N = 1 << 20;
-    std::vector<_Float16> a(N), b(N), c(N, 0.0f);
+    std::vector<_Float16> a(N), b(N), c(N, (_Float16)0.0f);
     for (int i = 0; i < N; ++i) {
         a[i] = (_Float16)(float(i) * 0.001f);
         b[i] = (_Float16)(float(N-i) * 0.001f);
