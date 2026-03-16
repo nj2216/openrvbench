@@ -3,7 +3,7 @@
 All notable changes to OpenRVBench will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [1.0.0] - 2026-03-16
+## [1.0.2] - 2026-03-16
 
 ### Added
 - CPU benchmark: integer, FP, multi-thread scaling, LZ77 compression
