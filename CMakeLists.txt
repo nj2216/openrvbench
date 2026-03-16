@@ -71,6 +71,7 @@ add_subdirectory(benchmarks/memory)
 add_subdirectory(benchmarks/crypto)
 add_subdirectory(benchmarks/storage)
 add_subdirectory(benchmarks/thermal)
+add_subdirectory(benchmarks/extensions)
 
 if(ENABLE_RVV)
     add_subdirectory(benchmarks/vector)

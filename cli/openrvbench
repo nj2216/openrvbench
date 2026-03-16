@@ -53,7 +53,8 @@ BENCH_REGISTRY = {
     "storage": ("bench_storage", "Storage (sequential + random I/O)",            180),
     "network": ("bench_network", "Network (TCP throughput, UDP latency)",         60),
     "ai":      ("bench_ai",      "AI Inference (GEMM proxy + llama.cpp/ONNX)",   600),
-    "thermal": ("bench_thermal", "Thermal (60 s stress + throttle detection)",   120),
+    "thermal":    ("bench_thermal",     "Thermal (60 s stress + throttle detection)",   120),
+    "extensions": ("bench_extensions", "Extension (auto-detect + per-extension tests)",  120),
 }
 
 ALL_BENCHES = list(BENCH_REGISTRY.keys())
@@ -497,7 +498,7 @@ def cmd_run(args):
 
     # Skip thermal unless explicitly requested
     if target == "all" and not args.include_thermal:
-        to_run = [b for b in to_run if b != "thermal"]
+        to_run = [b for b in to_run if b != "thermal", "extensions"]
         print(yellow("  (thermal benchmark skipped by default — use --include-thermal)"))
         print()
 
