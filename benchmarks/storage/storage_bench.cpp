@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/mman.h>    /* posix_fadvise on some targets needs this */
 
 #ifdef __linux__
 #  include <linux/fs.h>

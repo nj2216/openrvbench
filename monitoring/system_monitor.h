@@ -7,6 +7,7 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include <functional>
 
 namespace openrv {
 

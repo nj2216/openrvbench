@@ -222,7 +222,6 @@ static void aes_encrypt_block(uint8_t state[16], const uint8_t* rk, int nr) {
     }
     // Final round (no MixColumns)
     for (int i = 0; i < 16; ++i) state[i] = sbox[state[i]];
-    tmp_shift:;
     {
         uint8_t tmp;
         tmp=state[1]; state[1]=state[5]; state[5]=state[9]; state[9]=state[13]; state[13]=tmp;
