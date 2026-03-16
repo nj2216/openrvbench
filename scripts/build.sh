@@ -125,6 +125,11 @@ fi
 [[ -z "$USER_CC"  ]] && error "No C compiler found.   Use --cc /path/to/gcc  or set CC=..."
 [[ -z "$USER_CXX" ]] && error "No C++ compiler found. Use --cxx /path/to/g++ or set CXX=..."
 
+# Resolve to absolute paths so CMake always gets /usr/bin/gcc-14 style paths,
+# never a bare name that could resolve differently inside CMake's environment.
+ABS_CC="$(command  -v "$USER_CC"  2>/dev/null || echo "$USER_CC")"
+ABS_CXX="$(command -v "$USER_CXX" 2>/dev/null || echo "$USER_CXX")"
+
 # ─── Banner ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYN}${BLD}"
@@ -170,11 +175,11 @@ fi
 
 # ─── RVV probe (uses the chosen compiler) ─────────────────────────────────────
 if [[ "$ENABLE_RVV" == "ON" ]]; then
-  info "Probing $USER_CXX for -march=rv64gcv support..."
-  if echo 'int main(){}' | "$USER_CXX" -x c++ - -march=rv64gcv -o /dev/null 2>/dev/null; then
-    ok "RVV supported by $USER_CXX"
+  info "Probing $ABS_CXX for -march=rv64gcv support..."
+  if echo 'int main(){}' | "$ABS_CXX" -x c++ - -march=rv64gcv -o /dev/null 2>/dev/null; then
+    ok "RVV supported by $ABS_CXX"
   else
-    warn "$USER_CXX does not support -march=rv64gcv — disabling RVV"
+    warn "$ABS_CXX does not support -march=rv64gcv — disabling RVV"
     ENABLE_RVV=OFF
   fi
 fi
@@ -182,8 +187,8 @@ fi
 # ─── Configuration summary ────────────────────────────────────────────────────
 echo ""
 info "Build configuration:"
-echo "  CC           : $USER_CC"
-echo "  CXX          : $USER_CXX"
+echo "  CC           : $ABS_CC"
+echo "  CXX          : $ABS_CXX"
 echo "  Build dir    : $BUILD_DIR"
 echo "  Install dir  : $PREFIX"
 echo "  Parallel jobs: $JOBS"
@@ -201,6 +206,22 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+# ─── Stale cache detection ────────────────────────────────────────────────────
+# If CMakeCache.txt records a different C++ compiler than we're about to use,
+# wipe just the cache file (not the whole build dir) so CMake starts fresh.
+# This avoids the "you have changed variables" error without a full --clean.
+CACHE_FILE="$BUILD_DIR/CMakeCache.txt"
+if [[ -f "$CACHE_FILE" ]]; then
+  CACHED_CXX="$(grep -m1 '^CMAKE_CXX_COMPILER:' "$CACHE_FILE"                 | cut -d= -f2 | tr -d '[:space:]')"
+  if [[ -n "$CACHED_CXX" && "$CACHED_CXX" != "$ABS_CXX" ]]; then
+    warn "Compiler changed: cache has '$CACHED_CXX', now using '$ABS_CXX'"
+    info "Auto-wiping CMakeCache.txt and CMakeFiles/ to avoid stale-cache errors..."
+    rm -f  "$CACHE_FILE"
+    rm -rf "$BUILD_DIR/CMakeFiles"
+    ok "Cache cleared — full re-configure will run"
+  fi
+fi
+
 # ─── CMake configure ──────────────────────────────────────────────────────────
 info "Configuring with CMake..."
 
@@ -209,8 +230,8 @@ BUILD_TYPE=$([ "$RELEASE" == "ON" ] && echo "Release" || echo "RelWithDebInfo")
 CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
   -DCMAKE_INSTALL_PREFIX="$PREFIX"
-  -DCMAKE_C_COMPILER="$USER_CC"
-  -DCMAKE_CXX_COMPILER="$USER_CXX"
+  -DCMAKE_C_COMPILER="$ABS_CC"
+  -DCMAKE_CXX_COMPILER="$ABS_CXX"
   -DENABLE_RVV="$ENABLE_RVV"
   -DENABLE_OPENMP=ON
   -DENABLE_AI_BENCH="$ENABLE_AI"
@@ -231,7 +252,7 @@ cmake "${CMAKE_ARGS[@]}" "$ROOT_DIR" || error "CMake configuration failed"
 ok "CMake configuration successful"
 
 # ─── Build ────────────────────────────────────────────────────────────────────
-info "Building with $USER_CXX ($JOBS parallel jobs)..."
+info "Building with $ABS_CXX ($JOBS parallel jobs)..."
 make -j"$JOBS" 2>&1 | tee /tmp/openrvbench_build.log
 if [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
   error "Build failed. Full log: /tmp/openrvbench_build.log"
@@ -291,7 +312,7 @@ echo -e "${GRN}${BLD}═══════════════════�
 echo -e "${GRN}${BLD}  Build & Install Complete!${RST}"
 echo -e "${GRN}${BLD}════════════════════════════════════════════${RST}"
 echo ""
-echo "  Compiler used  : $USER_CXX"
+echo "  Compiler used  : $ABS_CXX"
 echo "  RVV enabled    : $ENABLE_RVV"
 echo ""
 echo "  Run benchmarks:"
