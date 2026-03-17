@@ -524,7 +524,14 @@ static ExtResult bench_Zbc(bool detected) {
         while (elapsed(t0) < BENCH_SECS) {
 #if defined(__riscv_zbc)
             for (int i = 0; i < N; ++i)
-                out[i] = __builtin_riscv_clmul_64(a[i], b[i]);
+            // Zbc: carry-less multiply (clmul) via inline asm
+            {
+                uint64_t result;
+                __asm__ volatile("clmul %0, %1, %2"
+                                : "=r"(result)
+                                : "r"(a[i]), "r"(b[i]));
+                out[i] = result;
+            }
 #else
             // Compiler may still vectorise/optimise the known pattern
             for (int i = 0; i < N; ++i) out[i] = sw_clmul(a[i], b[i]);

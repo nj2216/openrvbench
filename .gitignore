@@ -16,3 +16,4 @@ __pycache__/
 results/*.json
 /tmp/openrvbench_*
 .DS_Store
+/.vscode
