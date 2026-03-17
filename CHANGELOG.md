@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.1] - 2026-03-17
+
+### Fixed
+- `bench_extensions` Zbc carry-less multiply test was incorrectly using a software fallback instead of the intended inline assembly version. This has been corrected to properly benchmark the hardware `clmul` instruction when the Zbc extension is present.
+
+---
+
 ## [1.1.0] - 2026-03-16
 
 ### Added
